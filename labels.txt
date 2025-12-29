@@ -1,0 +1,5 @@
+0 Neutral
+1 Surprise
+2 Thinking
+3 Smiling
+4 Shocked
