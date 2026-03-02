@@ -1,12 +1,24 @@
 import cv2
 import numpy as np
-import pyvirtualcam
+import sys
+import platform
 from PIL import Image
 import os
 import warnings
 warnings.filterwarnings('ignore')
 #test update
 import tensorflow as tf
+
+# Try to import pyvirtualcam, but make it optional
+try:
+    import pyvirtualcam
+    VIRTUAL_CAM_AVAILABLE = True
+except ImportError:
+    VIRTUAL_CAM_AVAILABLE = False
+    print("Warning: pyvirtualcam not installed. Running in preview-only mode.")
+    print("To enable virtual camera, install: pip install pyvirtualcam")
+    if platform.system() == "Darwin":  # macOS
+        print("On macOS, you also need OBS Studio with Virtual Camera enabled.")
 
 _original_depthwise_init = tf.keras.layers.DepthwiseConv2D.__init__
 
@@ -59,17 +71,27 @@ if not loaded_images:
         loaded_images[i] = default_img.copy()
 
 # Open the webcam
+print("Attempting to open webcam...")
 camera = cv2.VideoCapture(0)
 if not camera.isOpened():
-    print("Error: Could not open webcam")
-    exit()
+    print("\n❌ Error: Could not open webcam")
+    if platform.system() == "Darwin":  # macOS
+        print("\nOn macOS, please check:")
+        print("  1. Go to System Settings → Privacy & Security → Camera")
+        print("  2. Make sure Terminal (or your Python app) has camera access")
+        print("  3. You may need to restart Terminal after granting permission")
+    exit(1)
+print("✓ Webcam opened successfully")
 
 # Get camera properties
 camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
 camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
-print("Starting virtual camera...")
-print("This will create a virtual camera that Discord can use.")
+print("Starting application...")
+if VIRTUAL_CAM_AVAILABLE:
+    print("Virtual camera mode enabled - This will create a virtual camera for Discord/Zoom.")
+else:
+    print("Preview-only mode - Virtual camera not available.")
 print("Press 'q' to quit")
 print("\nExpression mapping:")
 for idx, name in enumerate(class_names):
@@ -80,79 +102,111 @@ current_expression = 0
 frame_count = 0
 prediction_interval = 5  # Predict every 5 frames for performance
 
-try:
-    # Create virtual camera with pyvirtualcam
-    with pyvirtualcam.Camera(width=640, height=480, fps=30) as vcam:
-        print(f'\nVirtual camera device: {vcam.device}')
-        print('Virtual camera is now active! You can select it in Discord.')
+def run_with_virtual_camera():
+    """Run with virtual camera enabled"""
+    global current_expression, frame_count
+    
+    try:
+        with pyvirtualcam.Camera(width=640, height=480, fps=30) as vcam:
+            print(f'\n✓ Virtual camera device: {vcam.device}')
+            print('Virtual camera is now active! You can select it in Discord.')
+            
+            run_main_loop(vcam)
+    except Exception as e:
+        print(f"\n❌ Error starting virtual camera: {e}")
+        if platform.system() == "Darwin":  # macOS
+            print("\nOn macOS, you need OBS Studio with Virtual Camera:")
+            print("  1. Install OBS: https://obsproject.com/")
+            print("  2. Open OBS Studio")
+            print("  3. Go to Tools → Start Virtual Camera")
+            print("  4. Keep OBS running and try again")
+        raise
+
+def run_preview_only():
+    """Run in preview-only mode without virtual camera"""
+    global current_expression, frame_count
+    print("\n✓ Running in preview mode")
+    run_main_loop(None)
+
+def run_main_loop(vcam=None):
+    """Main processing loop
+    
+    Args:
+        vcam: Virtual camera object, or None for preview-only mode
+    """
+    global current_expression, frame_count
+    
+    while True:
+        # Capture frame-by-frame
+        success, image = camera.read()
+        if not success:
+            print("Failed to grab frame")
+            break
         
-        while True:
-            # Capture frame-by-frame
-            success, image = camera.read()
-            if not success:
-                print("Failed to grab frame")
-                break
+        # Only run prediction every N frames for better performance
+        if frame_count % prediction_interval == 0:
+            # Prepare image for model
+            # Resize to 224x224 for the model
+            resized = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
             
-            # Only run prediction every N frames for better performance
-            if frame_count % prediction_interval == 0:
-                # Prepare image for model
-                # Resize to 224x224 for the model
-                resized = cv2.resize(image, (224, 224), interpolation=cv2.INTER_AREA)
-                
-                # Convert BGR to RGB
-                rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-                
-                # Make the image a numpy array and reshape it
-                image_array = np.asarray(rgb_image, dtype=np.float32).reshape(1, 224, 224, 3)
-                
-                # Normalize the image array
-                image_array = (image_array / 127.5) - 1
-                
-                # Predict
-                prediction = model.predict(image_array, verbose=0)
-                index = np.argmax(prediction)
-                current_expression = index
-                confidence = prediction[0][index]
-                
-                # Print prediction
-                class_name = class_names[index] if index < len(class_names) else "Unknown"
-                print(f"Expression: {class_name} (Confidence: {confidence:.2f})")
+            # Convert BGR to RGB
+            rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
             
-            frame_count += 1
+            # Make the image a numpy array and reshape it
+            image_array = np.asarray(rgb_image, dtype=np.float32).reshape(1, 224, 224, 3)
             
-            # Get the image corresponding to the detected expression
-            display_image = loaded_images.get(current_expression, loaded_images[0])
+            # Normalize the image array
+            image_array = (image_array / 127.5) - 1
             
-            # Add text overlay showing current expression
-            overlay_image = display_image.copy()
-            class_name = class_names[current_expression] if current_expression < len(class_names) else "Unknown"
-            cv2.putText(overlay_image, f"Expression: {class_name}", (10, 30),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+            # Predict
+            prediction = model.predict(image_array, verbose=0)
+            index = np.argmax(prediction)
+            current_expression = index
+            confidence = prediction[0][index]
             
+            # Print prediction
+            class_name = class_names[index] if index < len(class_names) else "Unknown"
+            print(f"Expression: {class_name} (Confidence: {confidence:.2f})")
+        
+        frame_count += 1
+        
+        # Get the image corresponding to the detected expression
+        display_image = loaded_images.get(current_expression, loaded_images[0])
+        
+        # Add text overlay showing current expression
+        overlay_image = display_image.copy()
+        class_name = class_names[current_expression] if current_expression < len(class_names) else "Unknown"
+        cv2.putText(overlay_image, f"Expression: {class_name}", (10, 30),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        
+        # Send to virtual camera if available
+        if vcam is not None:
             # Convert BGR to RGB for virtual camera
             rgb_frame = cv2.cvtColor(overlay_image, cv2.COLOR_BGR2RGB)
-            
-            # Send to virtual camera
             vcam.send(rgb_frame)
-            
-            # Also display in a window for preview
-            cv2.imshow('Virtual Camera Preview', overlay_image)
-            
-            # Wait for key press
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                break
+        
+        # Also display in a window for preview
+        cv2.imshow('Virtual Camera Preview', overlay_image)
+        
+        # Wait for key press
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+
+try:
+    # Run with or without virtual camera depending on availability
+    if VIRTUAL_CAM_AVAILABLE:
+        run_with_virtual_camera()
+    else:
+        run_preview_only()
                 
+except KeyboardInterrupt:
+    print("\n\nInterrupted by user")
 except Exception as e:
-    print(f"Error: {e}")
-    print("\nNote: If you see 'No module named pyvirtualcam', install it with:")
-    print("  pip install pyvirtualcam")
-    print("\nOn macOS, you also need to install OBS and enable OBS Virtual Camera:")
-    print("  1. Install OBS: https://obsproject.com/")
-    print("  2. Start OBS")
-    print("  3. Go to Tools -> Start Virtual Camera")
-    print("  4. Then run this script")
+    print(f"\n❌ Error: {e}")
+    import traceback
+    traceback.print_exc()
 finally:
     # Release everything
     camera.release()
     cv2.destroyAllWindows()
-    print("\nVirtual camera stopped.")
+    print("\n✓ Application stopped.")
