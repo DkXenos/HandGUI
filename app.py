@@ -1,7 +1,4 @@
-print('Hello World')"""
-Split-screen expression detector with tf-keras for better compatibility
-+ MediaPipe hand and face detection with indicators
-"""
+
 import cv2
 import numpy as np
 import os
