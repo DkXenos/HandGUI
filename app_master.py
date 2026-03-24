@@ -10,10 +10,21 @@ import numpy as np
 import os
 import warnings
 import tensorflow as tf
+import mediapipe as mp
 
 # Suppress warnings
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
+    min_tracking_confidence=0.5
+)
 
 # Fix for Teachable Machine model compatibility
 # Monkey-patch DepthwiseConv2D to ignore 'groups' parameter which sometimes causes issues in newer TF versions
@@ -148,6 +159,47 @@ def main():
 
             # Combine and Show
             canvas = np.hstack((webcam_display, expr_display))
+
+            # --- MEDIA PIPE SCI-FI OVERLAY ---
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb_frame)
+
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    # Draw custom sci-fi connections manually
+                    # Thumb: 1-4, Index: 5-8, Middle: 9-12, Ring: 13-16, Pinky: 17-20
+                    fingers_tips = [4, 8, 12, 16, 20]
+                    finger_names = ["THUMB", "INDEX", "MIDDLE", "RING", "PINKY"]
+                    
+                    h, w, c = frame.shape
+                    
+                    for i, tip_id in enumerate(fingers_tips):
+                        lm = hand_landmarks.landmark[tip_id]
+                        # Account for the 640x480 resize used in webcam_display
+                        cx, cy = int(lm.x * 640), int(lm.y * 480)
+                        
+                        # Draw Square (Sci-Fi Box)
+                        box_size = 15
+                        cv2.rectangle(canvas, (cx - box_size, cy - box_size), (cx + box_size, cy + box_size), (0, 255, 0), 1)
+                        
+                        # Draw Line connecting to a sidebar
+                        line_end_x = 10
+                        line_end_y = 60 + (i * 30)
+                        cv2.line(canvas, (cx, cy), (line_end_x + 80, line_end_y), (0, 255, 0), 1)
+                        
+                        # Add Tag and Number
+                        cv2.putText(canvas, f"FINGER {i+1}: {finger_names[i]}", (line_end_x, line_end_y), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+                    # Draw hand skeleton in sci-fi style (neon green)
+                    mp_drawing.draw_landmarks(
+                        canvas[:, :640], # Draw on the webcam half
+                        hand_landmarks, 
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
+                        mp_drawing.DrawingSpec(color=(0, 200, 0), thickness=1)
+                    )
+
             cv2.imshow('HandGUI Expression Detector', canvas)
 
             if cv2.waitKey(1) & 0xFF == ord('q'):
