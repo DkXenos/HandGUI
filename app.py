@@ -1,194 +1,216 @@
-
+"""
+Master Expression Detection App
+Features:
+- Split-screen expression detector (Webcam | Expression Image)
+- Teachable Machine model support (Keras/TensorFlow)
+- Monkey-patched DepthwiseConv2D for compatibility
+"""
 import cv2
 import numpy as np
 import os
 import warnings
+import tensorflow as tf
+import mediapipe as mp
+
+# Suppress warnings
 warnings.filterwarnings('ignore')
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
 
-import tf_keras as keras
-import mediapipe as mp
-from mediapipe.tasks import python
-from mediapipe.tasks.python import vision
-
-np.set_printoptions(suppress=True)
-
-
-HAND_CONNECTIONS = [
-    (0, 1), (1, 2), (2, 3), (3, 4),  
-    (0, 5), (5, 6), (6, 7), (7, 8),  
-    (0, 9), (9, 10), (10, 11), (11, 12),  
-    (0, 13), (13, 14), (14, 15), (15, 16),  
-    (0, 17), (17, 18), (18, 19), (19, 20),  
-    (5, 9), (9, 13), (13, 17)  
-]
-
-def draw_hand_landmarks(image, hand_landmarks):
-    """Draw hand landmarks on the image using OpenCV"""
-    h, w, c = image.shape
-    
-    
-    for connection in HAND_CONNECTIONS:
-        start_idx, end_idx = connection
-        start_landmark = hand_landmarks[start_idx]
-        end_landmark = hand_landmarks[end_idx]
-        
-        start_point = (int(start_landmark.x * w), int(start_landmark.y * h))
-        end_point = (int(end_landmark.x * w), int(end_landmark.y * h))
-        
-        cv2.line(image, start_point, end_point, (0, 255, 0), 2)
-    
-    
-    for landmark in hand_landmarks:
-        x = int(landmark.x * w)
-        y = int(landmark.y * h)
-        cv2.circle(image, (x, y), 5, (255, 0, 0), -1)
-        cv2.circle(image, (x, y), 5, (0, 255, 255), 2)
-    
-    return image
-
-
-base_options = python.BaseOptions(model_asset_path='hand_landmarker.task')
-options = vision.HandLandmarkerOptions(
-    base_options=base_options,
-    num_hands=2,
-    min_hand_detection_confidence=0.5,
-    min_hand_presence_confidence=0.5,
+# Initialize MediaPipe Hands
+mp_hands = mp.solutions.hands
+mp_drawing = mp.solutions.drawing_utils
+hands = mp_hands.Hands(
+    static_image_mode=False,
+    max_num_hands=1,
+    min_detection_confidence=0.7,
     min_tracking_confidence=0.5
 )
-hand_detector = vision.HandLandmarker.create_from_options(options)
 
-print("Loading model...")
-try:
+# Fix for Teachable Machine model compatibility
+# Monkey-patch DepthwiseConv2D to ignore 'groups' parameter which sometimes causes issues in newer TF versions
+_original_depthwise_init = tf.keras.layers.DepthwiseConv2D.__init__
 
-    model = keras.models.load_model("keras_model.h5", compile=False)
-    print("✓ Model loaded successfully\n")
-except Exception as e:
-    print(f"❌ Error loading model: {e}\n")
-    print("Let's test the images first with keyboard controls")
-    print("Run: python3 simple_test.py")
-    exit(1)
+def _patched_depthwise_init(self, *args, **kwargs):
+    kwargs.pop('groups', None)
+    _original_depthwise_init(self, *args, **kwargs)
 
-class_names = []
-with open("labels.txt", "r") as f:
-    class_names = [line.strip() for line in f.readlines()]
+tf.keras.layers.DepthwiseConv2D.__init__ = _patched_depthwise_init
 
-image_map = {
-    0: "neutral.jpeg",
-    1: "surprised.jpeg",
-    2: "thinking.jpg",
-    3: "smiling.jpg",
-    4: "schocked.png"
-}
+# Disable scientific notation
+np.set_printoptions(suppress=True)
 
-loaded_images = {}
-for idx, img_path in image_map.items():
-    if os.path.exists(img_path):
-        img = cv2.imread(img_path)
-        if img is not None:
-            img = cv2.resize(img, (640, 480))
-            loaded_images[idx] = img
-            print(f"✓ Loaded {img_path}")
-
-camera = cv2.VideoCapture(0)
-if not camera.isOpened():
-    print("Error: Could not open webcam")
-    exit()
-
-camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-
-print("\n" + "="*60)
-print("SPLIT-SCREEN EXPRESSION DETECTOR + HAND TRACKING")
-print("="*60)
-print("Left: Your webcam with hand indicators")
-print("Right: Expression image")
-print("The image will change based on your detected expression!")
-print("Press 'q' to quit\n")
-
-current_expression = 0
-frame_count = 0
-prediction_interval = 5 
-
-try:
-    while True:
-        success, webcam_frame = camera.read()
-        if not success:
-            print("Failed to grab frame")
-            break
-        
-    
-        if frame_count % prediction_interval == 0:
-        
-            resized = cv2.resize(webcam_frame, (224, 224), interpolation=cv2.INTER_AREA)
-            rgb_image = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
-            image_array = np.asarray(rgb_image, dtype=np.float32).reshape(1, 224, 224, 3)
-            image_array = (image_array / 127.5) - 1
-            
-            
-            prediction = model.predict(image_array, verbose=0)
-            index = np.argmax(prediction)
-            current_expression = index
-            confidence = prediction[0][index]
-            
-            
-            class_name = class_names[index] if index < len(class_names) else "Unknown"
-            print(f"Expression: {class_name:12} Confidence: {confidence:.2%}")
-        
-        frame_count += 1
-        
-        
-        if current_expression in loaded_images:
-            expression_image = loaded_images[current_expression].copy()
-        else:
-            expression_image = np.zeros((480, 640, 3), dtype=np.uint8)
-            cv2.putText(expression_image, "No image", (250, 240),
-                       cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
-        
-        
-        webcam_display = cv2.resize(webcam_frame, (640, 480))
-        
-        
-        webcam_display = cv2.flip(webcam_display, 1)
-        
-        
-        rgb_frame = cv2.cvtColor(webcam_display, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-        
-        
+def load_expression_model(model_path="keras_model.h5"):
+    """Load the model with specific compatibility fixes."""
+    try:
+        model = tf.keras.models.load_model(
+            model_path, 
+            compile=False,
+            safe_mode=False
+        )
+        print(f"✓ Model loaded successfully from {model_path}")
+        return model
+    except Exception as e:
+        print(f"Error loading model: {e}")
+        print("\nTrying alternative loading with custom scope...")
         try:
-            hand_results = hand_detector.detect(mp_image)
-            if hand_results.hand_landmarks:
-                for hand_landmarks in hand_results.hand_landmarks:
-                    webcam_display = draw_hand_landmarks(webcam_display, hand_landmarks)
-        except Exception as e:
-            pass  
-        
-        
-        class_name = class_names[current_expression] if current_expression < len(class_names) else "Unknown"
-        cv2.putText(webcam_display, "Your Webcam", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        cv2.putText(expression_image, f"Expression: {class_name}", (10, 30),
-                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
-        
-        
-        split_screen = np.hstack((webcam_display, expression_image))
-        
-        
-        cv2.imshow('Expression Detection - Split Screen', split_screen)
-        
-        
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+            with tf.keras.utils.custom_object_scope({'DepthwiseConv2D': tf.keras.layers.DepthwiseConv2D}):
+                model = tf.keras.models.load_model(model_path, compile=False)
+            print("✓ Model loaded with custom scope")
+            return model
+        except Exception as e2:
+            print(f"Failed to load model: {e2}")
+            return None
+
+def main():
+    # 1. Initialization
+    model = load_expression_model("keras_model.h5")
+    if model is None:
+        print("Required model file 'keras_model.h5' not found or failed to load.")
+        return
+
+    # Load labels
+    try:
+        with open("labels.txt", "r") as f:
+            class_names = [line.strip().split(' ', 1)[-1] if ' ' in line else line.strip() for line in f.readlines()]
+    except FileNotFoundError:
+        print("Required labels file 'labels.txt' not found.")
+        return
+
+    # Map label indices to available image files
+    image_map = {
+        0: "neutral.jpeg",
+        1: "smiling.jpg",
+        2: "surprised.jpeg",
+        3: "thinking.jpg",
+        4: "schocked.png"
+    }
+
+    # Load and resize expression images
+    loaded_images = {}
+    for idx, img_path in image_map.items():
+        if os.path.exists(img_path):
+            img = cv2.imread(img_path)
+            if img is not None:
+                img = cv2.resize(img, (640, 480))
+                loaded_images[idx] = img
+                print(f"✓ Loaded {img_path}")
+            else:
+                print(f"✗ Could not read {img_path}")
+        else:
+            print(f"✗ Image {img_path} missing")
+
+    # 2. Camera Setup
+    camera = cv2.VideoCapture(0)
+    if not camera.isOpened():
+        print("Error: Could not access webcam.")
+        return
+    
+    camera.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    camera.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+
+    print("\n" + "="*60)
+    print("EXPRESSION DETECTOR - MASTER VERSION")
+    print("="*60)
+    print("Controls: Press 'q' to Quit")
+    print("Detection active...")
+
+    # 3. Main Loop
+    current_expression = 0
+    frame_count = 0
+    prediction_interval = 5  # Optimize by predicting every N frames
+
+    try:
+        while True:
+            ret, frame = camera.read()
+            if not ret:
+                break
             
-except KeyboardInterrupt:
-    print("\nStopped by user")
-except Exception as e:
-    print(f"Error: {e}")
-    import traceback
-    traceback.print_exc()
-finally:
-    camera.release()
-    hand_detector.close()
-    cv2.destroyAllWindows()
-    print("\nDone!")
+            # Prediction Logic
+            if frame_count % prediction_interval == 0:
+                # Pre-process for model (224x224 RGB normalized)
+                resized = cv2.resize(frame, (224, 224), interpolation=cv2.INTER_AREA)
+                rgb = cv2.cvtColor(resized, cv2.COLOR_BGR2RGB)
+                input_data = np.asarray(rgb, dtype=np.float32).reshape(1, 224, 224, 3)
+                input_data = (input_data / 127.5) - 1
+                
+                prediction = model.predict(input_data, verbose=0)
+                current_expression = np.argmax(prediction)
+                confidence = prediction[0][current_expression]
+                
+                label = class_names[current_expression] if current_expression < len(class_names) else "Unknown"
+                print(f"\rExpression: {label:12} | Confidence: {confidence:.2%}", end="", flush=True)
+
+            frame_count += 1
+
+            # GUI Construction
+            webcam_display = cv2.resize(frame, (640, 480))
+            
+            if current_expression in loaded_images:
+                expr_display = loaded_images[current_expression].copy()
+            else:
+                expr_display = np.zeros((480, 640, 3), dtype=np.uint8)
+                cv2.putText(expr_display, "Image Not Found", (180, 240), 
+                           cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+
+            # Annotations
+            label = class_names[current_expression] if current_expression < len(class_names) else "???"
+            cv2.putText(webcam_display, "WEBCAM", (20, 40), 1, 2, (0, 255, 0), 2)
+            cv2.putText(expr_display, f"DETECTED: {label}", (20, 40), 1, 2, (0, 255, 0), 2)
+
+            # Combine and Show
+            canvas = np.hstack((webcam_display, expr_display))
+
+            # --- MEDIA PIPE SCI-FI OVERLAY ---
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            results = hands.process(rgb_frame)
+
+            if results.multi_hand_landmarks:
+                for hand_landmarks in results.multi_hand_landmarks:
+                    # Draw custom sci-fi connections manually
+                    # Thumb: 1-4, Index: 5-8, Middle: 9-12, Ring: 13-16, Pinky: 17-20
+                    fingers_tips = [4, 8, 12, 16, 20]
+                    finger_names = ["THUMB", "INDEX", "MIDDLE", "RING", "PINKY"]
+                    
+                    h, w, c = frame.shape
+                    
+                    for i, tip_id in enumerate(fingers_tips):
+                        lm = hand_landmarks.landmark[tip_id]
+                        # Account for the 640x480 resize used in webcam_display
+                        cx, cy = int(lm.x * 640), int(lm.y * 480)
+                        
+                        # Draw Square (Sci-Fi Box)
+                        box_size = 15
+                        cv2.rectangle(canvas, (cx - box_size, cy - box_size), (cx + box_size, cy + box_size), (0, 255, 0), 1)
+                        
+                        # Draw Line connecting to a sidebar
+                        line_end_x = 10
+                        line_end_y = 60 + (i * 30)
+                        cv2.line(canvas, (cx, cy), (line_end_x + 80, line_end_y), (0, 255, 0), 1)
+                        
+                        # Add Tag and Number
+                        cv2.putText(canvas, f"FINGER {i+1}: {finger_names[i]}", (line_end_x, line_end_y), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 255, 0), 1)
+
+                    # Draw hand skeleton in sci-fi style (neon green)
+                    mp_drawing.draw_landmarks(
+                        canvas[:, :640], # Draw on the webcam half
+                        hand_landmarks, 
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=2),
+                        mp_drawing.DrawingSpec(color=(0, 200, 0), thickness=1)
+                    )
+
+            cv2.imshow('HandGUI Expression Detector', canvas)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        print("\nCleaning up...")
+        camera.release()
+        cv2.destroyAllWindows()
+
+if __name__ == "__main__":
+    main()
